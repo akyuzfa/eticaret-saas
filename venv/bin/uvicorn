@@ -1,4 +1,4 @@
-#!/workspaces/eticaret-saas/venv/bin/python3
+#!/workspaces/eticaret-saas/venv/bin/python
 import sys
 from uvicorn.main import main
 if __name__ == '__main__':

@@ -1,233 +1,166 @@
 import pandas as pd
-from facebook_business.api import FacebookAdsApi
-from facebook_business.adobjects.adaccount import AdAccount
+import numpy as np
+import streamlit as st
+import requests
 
-# ==============================================================================
-# 1. KISIM: FİNANSAL VE STRATEJİK ANALİZ MOTORU
-# ==============================================================================
-def veriyi_ozetle(dosya_yolu, baslangic_tarihi, bitis_tarihi):
-    chunks = []
-    try:
-        gerekli_sutunlar = [
-            'Sipariş Tarihi', 'Sipariş Numarası', 'Sipariş No', 'Sipariş ID',
-            'Ürün Adı', 'Varyant Değeri 1', 'Ürün Sayısı', 
-            'Ürün İndirim Fiyatı', 'Ürün Alış Fiyatı', 'Kargo Adresi Şehir', 
-            'Toplam', 'Sipariş Ödeme Durumu'
-        ]
-        
-        first_chunk = next(pd.read_csv(dosya_yolu, chunksize=1, low_memory=False))
-        first_chunk.columns = first_chunk.columns.str.strip()
-        mevcut_sutunlar = [col for col in gerekli_sutunlar if col in first_chunk.columns]
-        
-        for chunk in pd.read_csv(dosya_yolu, chunksize=20000, usecols=mevcut_sutunlar, low_memory=False):
-            chunk.columns = chunk.columns.str.strip()
-            chunks.append(chunk)
-    except Exception:
-        return {}, {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        
-    if not chunks:
-        return {}, {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        
-    df = pd.concat(chunks, axis=0)
-    
-    # Ödeme Durumu Filtresi
-    if 'Sipariş Ödeme Durumu' in df.columns:
-        df['Sipariş Ödeme Durumu'] = df['Sipariş Ödeme Durumu'].astype(str).str.strip()
-        gecerli_odemeler = ['Ödendi', 'Parçalı Ödendi', 'Bekliyor']
-        df = df[df['Sipariş Ödeme Durumu'].isin(gecerli_odemeler)]
-    
-    if df.empty:
-        return {}, {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    
-    siparis_no_kolonu = 'Sipariş Numarası' if 'Sipariş Numarası' in df.columns else ('Sipariş No' if 'Sipariş No' in df.columns else 'Sipariş ID')
-    if siparis_no_kolonu in df.columns:
-        df['Sipariş Numarası'] = df[siparis_no_kolonu].astype(str).str.strip()
-    else:
-        return {}, {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+# =================================================================
+# 🔑 META ADS API KİMLİK BİLGİLERİ
+# Token ve Hesap ID bilgilerinizi aşağıdaki tırnak işaretlerinin içine yazın.
+# =================================================================
+META_ACCESS_TOKEN = "EAAN6R3WgZApYBRolMblUZAzCN6ePzTPx9iPjddwNjlIpKa50oHRPNIKtIp41ehe4F8UCuVhVZBrlxthb3TY19ZAGG95fF4hEYOpw00YJ6bhUZAD0FkxbZBnVumcZAodCmcuTZBZAKCysHNjeBDGCTaN5ZAJkG8R1FWUjZCVghaZB8I7Iaa2mioAANMxjP1ddtPN3Qg1kadUyFT9EX44pFQZDZD"
+AD_ACCOUNT_ID = "act_1604034446875292"
+# =================================================================
 
-    if 'Varyant Değeri 1' in df.columns:
-        df['Varyant Değeri 1'] = df['Varyant Değeri 1'].fillna('Standart').astype(str).str.strip()
-    else:
-        df['Varyant Değeri 1'] = 'Standart'
-        
-    if 'Ürün Adı' in df.columns:
-        df['Ürün Adı'] = df['Ürün Adı'].astype(str).str.strip().replace({'Dana Sucuk - Doğal Fermente': 'Dana Sucuk'})
-    
-    if 'Sipariş Tarihi' in df.columns:
-        df['Sipariş Tarihi'] = pd.to_datetime(df['Sipariş Tarihi'], errors='coerce', format='mixed')
-        df = df.dropna(subset=['Sipariş Tarihi'])
-    else:
-        return {}, {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    # Tarih Filtresi
-    baslangic_dt = pd.to_datetime(baslangic_tarihi)
-    bitis_dt = pd.to_datetime(bitis_tarihi)
-    df = df[(df['Sipariş Tarihi'] >= baslangic_dt) & (df['Sipariş Tarihi'] <= bitis_dt)]
-    
-    if df.empty:
-        return {}, {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    df['Sipariş Ayı'] = df['Sipariş Tarihi'].dt.to_period('M').astype(str)
-    
-    # 🌟 İSTEDİĞİNİZ DEĞİŞİKLİK: Ürün performansı ve marjlar için eski güvenli formül devrede
-    df['toplam_ciro'] = df['Ürün Sayısı'] * df['Ürün İndirim Fiyatı']
-    df['toplam_maliyet'] = df['Ürün Sayısı'] * df['Ürün Alış Fiyatı']
-    df['net_kar'] = df['toplam_ciro'] - df['toplam_maliyet']
-    
-    # Güvenli kâr marjı hesaplaması
-    df['kar_marji_orani'] = 0.0
-    gecerli_ciro = df['toplam_ciro'] > 0
-    df.loc[gecerli_ciro, 'kar_marji_orani'] = ((df.loc[gecerli_ciro, 'toplam_ciro'] - df.loc[gecerli_ciro, 'toplam_maliyet']) / df.loc[gecerli_ciro, 'toplam_ciro']) * 100
-    
-    # Şehir Dağılım Verisi
-    if 'Kargo Adresi Şehir' in df.columns:
-        df['Kargo Adresi Şehir'] = df['Kargo Adresi Şehir'].fillna('BELİRTİLMEMİŞ').astype(str).str.upper().str.strip()
-        aylik_sehir_analizi = df.groupby(['Sipariş Ayı', 'Kargo Adresi Şehir']).agg({
-            'Sipariş Numarası': 'nunique', 'toplam_ciro': 'sum', 'net_kar': 'sum'
-        }).reset_index().rename(columns={'Sipariş Numarası': 'Sipariş Adedi'})
-        
-        sehir_ay_pivot = aylik_sehir_analizi.pivot(index='Kargo Adresi Şehir', columns='Sipariş Ayı', values='Sipariş Adedi').fillna(0).astype(int).reset_index()
-    else:
-        aylik_sehir_analizi = pd.DataFrame()
-        sehir_ay_pivot = pd.DataFrame()
-
-    # Ürün Performans Analizi
-    urun_analiz = df.groupby(['Ürün Adı', 'Varyant Değeri 1']).agg({
-        'Ürün Sayısı': 'sum',
-        'toplam_ciro': 'sum',
-        'toplam_maliyet': 'sum',
-        'net_kar': 'sum',
-        'kar_marji_orani': 'mean'
-    }).reset_index()
-    
-    if not urun_analiz.empty:
-        urun_analiz['Tam Ürün Tanımı'] = urun_analiz['Ürün Adı'] + " (" + urun_analiz['Varyant Değeri 1'] + ")"
-        orta_adet = urun_analiz['Ürün Sayısı'].median()
-        orta_marj = urun_analiz['kar_marji_orani'].median()
-    else:
-        orta_adet, orta_marj = 0, 0
-    
-    # BCG Matrisi
-    segmentler = {
-        "Yıldızlar (Yüksek Satış - Yüksek Marj)": urun_analiz[(urun_analiz['Ürün Sayısı'] >= orta_adet) & (urun_analiz['kar_marji_orani'] >= orta_marj)] if not urun_analiz.empty else pd.DataFrame(),
-        "Sürümden Kazananlar (Yüksek Satış - Düşük Marj)": urun_analiz[(urun_analiz['Ürün Sayısı'] >= orta_adet) & (urun_analiz['kar_marji_orani'] < orta_marj)] if not urun_analiz.empty else pd.DataFrame(),
-        "Gizli Cevherler (Düşük Satış - Yüksek Marj)": urun_analiz[(urun_analiz['Ürün Sayısı'] < orta_adet) & (urun_analiz['kar_marji_orani'] >= orta_marj)] if not urun_analiz.empty else pd.DataFrame(),
-        "Ölü Kilo (Düşük Satış - Düşük Marj)": urun_analiz[(urun_analiz['Ürün Sayısı'] < orta_adet) & (urun_analiz['kar_marji_orani'] < orta_marj)] if not urun_analiz.empty else pd.DataFrame()
-    }
-
-    # 🌟 GENEL FİNANS İÇİN KORUNAN ÖZEL KOŞUL: 
-    # Genel konsolide ciro hesaplanırken dosyadaki indirimler düşülmüş 'Toplam' kolonu baz alınır.
-    if 'Toplam' in df.columns:
-        kasadaki_toplam_ciro = pd.to_numeric(df['Toplam'], errors='coerce').fillna(0).sum()
-    else:
-        kasadaki_toplam_ciro = df['toplam_ciro'].sum()
-
-    toplam_maliyet = df['toplam_maliyet'].sum()
-    genel_ozet = {
-        "toplam_ciro": kasadaki_toplam_ciro, 
-        "toplam_maliyet": toplam_maliyet, 
-        "toplam_net_kar": (kasadaki_toplam_ciro - toplam_maliyet),
-        "toplam_adet": df['Ürün Sayısı'].sum(), 
-        "genel_kar_marji": ((kasadaki_toplam_ciro - toplam_maliyet) / kasadaki_toplam_ciro * 100) if kasadaki_toplam_ciro > 0 else 0.0
-    }
-    
-    return segmentler, genel_ozet, urun_analiz, aylik_sehir_analizi, sehir_ay_pivot
-
-# ==============================================================================
-# 2. KISIM: MÜŞTERI COHORT VE PERSONA ANALİZİ
-# ==============================================================================
-def musteri_analizi_yap(dosya_yolu):
-    chunks = []
-    gerekli_sutunlar = ['Sipariş Tarihi', 'E-posta', 'Sipariş Numarası', 'Sipariş No', 'Sipariş ID', 'Ürün Sayısı', 'Ürün İndirim Fiyatı', 'Toplam', 'Sipariş Ödeme Durumu']
+def veriyi_yukle_ve_temizle():
+    """
+    ikas-siparisler-26201806.csv dosyasını belirtilen 
+    tam kolon isimlerine göre yükler ve işler.
+    """
+    dosya_adi = "ikas-siparisler-26201806.csv"
     
     try:
-        first_chunk = next(pd.read_csv(dosya_yolu, chunksize=1, low_memory=False))
-        first_chunk.columns = first_chunk.columns.str.strip()
-        mevcut_sutunlar = [col for col in gerekli_sutunlar if col in first_chunk.columns]
-        
-        for chunk in pd.read_csv(dosya_yolu, chunksize=20000, usecols=mevcut_sutunlar, low_memory=False):
-            chunk.columns = chunk.columns.str.strip()
-            chunks.append(chunk)
-    except Exception:
-        return pd.DataFrame(), pd.DataFrame()
-        
-    if not chunks:
-        return pd.DataFrame(), pd.DataFrame()
-        
-    df = pd.concat(chunks, axis=0)
-    
-    if 'Sipariş Ödeme Durumu' in df.columns:
-        df['Sipariş Ödeme Durumu'] = df['Sipariş Ödeme Durumu'].astype(str).str.strip()
-        gecerli_odemeler = ['Ödendi', 'Parçalı Ödendi', 'Bekliyor']
-        df = df[df['Sipariş Ödeme Durumu'].isin(gecerli_odemeler)]
-        
-    if df.empty:
-        return pd.DataFrame(), pd.DataFrame()
-        
-    df['Sipariş Tarihi'] = pd.to_datetime(df['Sipariş Tarihi'], errors='coerce', format='mixed')
-    df = df.dropna(subset=['Sipariş Tarihi'])
-    
-    musteri_kolonu = 'E-posta' if 'E-posta' in df.columns else df.columns[0]
-    siparis_no_kolonu = 'Sipariş Numarası' if 'Sipariş Numarası' in df.columns else ('Sipariş No' if 'Sipariş No' in df.columns else 'Sipariş ID')
-
-    df['Sipariş Ayı'] = df['Sipariş Tarihi'].dt.to_period('M')
-    df['İlk Sipariş Ayı'] = df.groupby(musteri_kolonu)['Sipariş Tarihi'].transform('min').dt.to_period('M')
-    
-    if 'Toplam' in df.columns:
-        df['satir_cirosu'] = pd.to_numeric(df['Toplam'], errors='coerce').fillna(0)
-    else:
-        df['satir_cirosu'] = df['Ürün Sayısı'] * df['Ürün İndirim Fiyatı']
-    
-    cohort_data = df.groupby(['İlk Sipariş Ayı', 'Sipariş Ayı']).agg({musteri_kolonu: 'nunique'}).reset_index()
-    cohort_data['Dönem Mesafesi'] = (cohort_data['Sipariş Ayı'] - cohort_data['İlk Sipariş Ayı']).apply(lambda x: x.n if hasattr(x, 'n') else 0)
-    
-    cohort_pivot = cohort_data.pivot(index='İlk Sipariş Ayı', columns='Dönem Mesafesi', values=musteri_kolonu).fillna(0)
-    cohort_sizes = cohort_pivot.iloc[:, 0]
-    retention_matrix = cohort_pivot.divide(cohort_sizes, axis=0) * 100
-    
-    siparis_bazli_ozet = df.groupby([musteri_kolonu, siparis_no_kolonu]).agg({
-        'Sipariş Tarihi': 'max', 'satir_cirosu': 'sum'
-    }).reset_index()
-    
-    bugun = pd.to_datetime('2026-06-10') 
-    rfm = siparis_bazli_ozet.groupby(musteri_kolonu).agg({
-        'Sipariş Tarihi': lambda x: (bugun - x.max()).days,
-        siparis_no_kolonu: 'count',
-        'satir_cirosu': 'sum'
-    }).reset_index()
-    
-    rfm.columns = [musteri_kolonu, 'Recency', 'Frequency', 'Monetary']
-    return retention_matrix, rfm
-
-# ==============================================================================
-# 3. KISIM: CANLI META ADS PERFORMANS ANALİZİ
-# ==============================================================================
-def meta_performans_cek(access_token, account_id, baslangic_tarihi, bitis_tarihi):
-    if not access_token or not account_id:
+        df = pd.read_csv(dosya_adi, encoding="utf-8-sig")
+    except FileNotFoundError:
+        st.error(f"'{dosya_adi}' dosyası bulunamadı! Lütfen proje ana dizinine yüklediğinizden emin olun.")
         return pd.DataFrame()
-    try:
-        if not str(account_id).startswith('act_'):
-            account_id = f"act_{account_id}"
-        FacebookAdsApi.init(access_token=access_token)
-        account = AdAccount(account_id)
-        fields = ['adset_id', 'adset_name', 'spend', 'actions', 'action_values']
-        params = {'time_range': {'since': baslangic_tarihi, 'until': bitis_tarihi}, 'level': 'adset'}
-        insights = account.get_insights(fields=fields, params=params)
-        data = []
-        for insight in insights:
-            purchases = 0
-            purchase_value = 0.0
-            if 'actions' in insight:
-                for action in insight['actions']:
-                    if action['action_type'] == 'purchase': purchases = int(action['value'])
-            if 'action_values' in insight:
-                for val in insight['action_values']:
-                    if val['action_type'] == 'purchase': purchase_value = float(val['value'])
-            harcanan = float(insight['spend'])
-            data.append({
-                'Reklam Seti Adı': insight['adset_name'], 'Harcanan Tutar (TL)': harcanan,
-                'Satış Adedi': purchases, 'Toplam Ciro (TL)': purchase_value
+
+    # --- KULLANICI TARAFINDAN BELİRTİLEN TAM KOLON HARİTASI ---
+    kolon_haritasi = {
+        'Sipariş Numarası': 'siparis_id',
+        'Sipariş Tarihi': 'tarih',
+        'Toplam': 'toplam_ciro',
+        'Ürün Sayısı': 'satis_adedi',
+        'Ürün İndirim Fiyatı': 'birim_satis_fiyati',
+        'Ürün Alış Fiyatı': 'birim_maliyet',
+        'Kargo Adresi Şehir': 'kargo_sehir',
+        'Ürün Adı': 'urun_adi',
+        'Varyant Değeri 1': 'varyant'
+    }
+    
+    df = df.rename(columns=kolon_haritasi)
+    
+    if 'varyant' not in df.columns:
+        possible_variant_cols = [c for c in df.columns if 'Varyant' in c or 'Seçenek' in c]
+        if possible_variant_cols:
+            df = df.rename(columns={possible_variant_cols[0]: 'varyant'})
+        else:
+            df['varyant'] = "Standart"
+
+    # --- VERİ TİPİ DÖNÜŞTÜRMELERİ ---
+    if 'tarih' in df.columns:
+        df["tarih"] = pd.to_datetime(df["tarih"], errors='coerce')
+    else:
+        df["tarih"] = pd.to_datetime("2026-01-01")
+
+    num_cols = ['toplam_ciro', 'satis_adedi', 'birim_satis_fiyati', 'birim_maliyet']
+    for col in num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        else:
+            df[col] = 0
+
+    # Gerçek Mal Maliyeti (COGS) Hesabı
+    df['mal_maliyeti'] = df['birim_maliyet'] * df['satis_adedi']
+
+    # --- ÖZEL KATEGORİ KONSOLİDASYONU ---
+    if 'urun_adi' in df.columns:
+        df['urun_adi'] = df['urun_adi'].replace({
+            'Dana Sucuk-Doğal Fermente': 'Dana Sucuk',
+            'Dana Sucuk - Doğal Fermente': 'Dana Sucuk'
+        })
+
+    return df
+
+def get_meta_ads_data(start_date, end_date):
+    """
+    Meta Graph API üzerinden tarih aralığına duyarlı olarak 
+    gerçek kampanya harcamalarını ve dönüşüm (ROAS) değerlerini çeker.
+    """
+    # Eğer henüz gerçek token girilmediyse panelin çökmemesi için uyarı verip simülasyona düşer
+    if "BURAYA" in META_ACCESS_TOKEN or "BURAYA" in AD_ACCOUNT_ID:
+        st.sidebar.warning("⚠️ Meta API Kimlik Bilgileri Eksik! (Şu an simülasyon verileri gösteriliyor)")
+        
+        # Güvenli Fallback Simülasyon Verisi
+        np.random.seed(42)
+        kampanyalar = ["Dönüşüm - Kampanyası - Dana Sucuk", "Dönüşüm - Kampanyası - Peynir", "TOFU - Bilinirlik", "Retargeting - Sepet"]
+        veri_listesi = []
+        for kampanya in kampanyalar:
+            harcama = np.random.uniform(4000, 15000)
+            sim_roas = np.random.uniform(2.5, 6.0)
+            veri_listesi.append({
+                "Kampanya Adı": kampanya,
+                "Harcama (TL)": round(harcama, 2),
+                "E-Ticaret Geliri (TL)": round(harcama * sim_roas, 2)
             })
-        return pd.DataFrame(data)
-    except Exception:
+        return pd.DataFrame(veri_listesi)
+
+    # Canlı Meta Insights API Çağrısı
+    url = f"https://graph.facebook.com/v19.0/{AD_ACCOUNT_ID}/insights"
+    
+    params = {
+        'access_token': META_ACCESS_TOKEN,
+        'level': 'campaign',
+        'fields': 'campaign_name,spend,action_values',
+        'time_range': f"{{\"since\":\"{start_date}\",\"until\":\"{end_date}\"}}",
+        'limit': 150
+    }
+    
+    try:
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        if 'error' in data:
+            st.error(f"Meta API Hatası: {data['error']['message']}")
+            return pd.DataFrame()
+            
+        api_verisi = []
+        for item in data.get('data', []):
+            kampanya_adi = item.get('campaign_name', 'Bilinmeyen Kampanya')
+            harcama = float(item.get('spend', 0))
+            
+            # Purchase event değerini parse etme
+            gelir = 0.0
+            action_values = item.get('action_values', [])
+            for action in action_values:
+                action_type = action.get('action_type', '')
+                if action_type in ['offsite_conversion.fb_pixel_purchase', 'purchase']:
+                    gelir = float(action.get('value', 0))
+                    break
+            
+            api_verisi.append({
+                "Kampanya Adı": kampanya_adi,
+                "Harcama (TL)": harcama,
+                "E-Ticaret Geliri (TL)": gelir
+            })
+            
+        return pd.DataFrame(api_verisi)
+        
+    except Exception as e:
+        st.error(f"Meta API bağlantı hatası oluştu: {e}")
         return pd.DataFrame()
+
+def bcg_stratejisi_hesapla(df):
+    if df.empty:
+        return pd.DataFrame()
+        
+    bcg_data = df.groupby(["urun_adi", "varyant"]).agg(
+        urun_sayisi=("satis_adedi", "sum"),
+        toplam_ciro=("toplam_ciro", "sum"),
+        toplam_maliyet=("mal_maliyeti", "sum")
+    ).reset_index()
+    
+    ciro_esik = bcg_data["toplam_ciro"].median() if not bcg_data.empty else 0
+    adet_esik = bcg_data["urun_sayisi"].median() if not bcg_data.empty else 0
+    
+    def segment_atama(row):
+        if row["toplam_ciro"] >= ciro_esik and row["urun_sayisi"] >= adet_esik:
+            return "Yıldızlar"
+        elif row["toplam_ciro"] < ciro_esik and row["urun_sayisi"] >= adet_esik:
+            return "Sürümden Kazananlar"
+        elif row["toplam_ciro"] >= ciro_esik and row["urun_sayisi"] < adet_esik:
+            return "Gizli Cevherler"
+        else:
+            return "Ölü Kilo"
+            
+    bcg_data["Strateji"] = bcg_data.apply(segment_atama, axis=1)
+    return bcg_data

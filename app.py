@@ -1,195 +1,173 @@
 import streamlit as st
+import plotly.express as px
+import numpy as np
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-import os
-import sys
+import datetime
+from analiz import veriyi_yukle_ve_temizle, bcg_stratejisi_hesapla, get_meta_ads_data
 
-# Çalışma dizinini sys.path'e zorunlu olarak ekliyoruz (Circular Import önleyici)
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+st.set_page_config(layout="wide", page_title="Kaşarcızade Performans & Strateji Paneli")
 
-try:
-    from analiz import veriyi_ozetle, musteri_analizi_yap, meta_performans_cek
-except ImportError:
-    import analiz
-    veriyi_ozetle = analiz.veriyi_ozetle
-    musteri_analizi_yap = analiz.musteri_analizi_yap
-    meta_performans_cek = analiz.meta_performans_cek
+st.markdown("""
+    <style>
+    .stMetric { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 1px 1px 5px rgba(0,0,0,0.05); border-left: 5px solid #00D1B2; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# Sayfa Genişlik Ayarı
-st.set_page_config(layout="wide", page_title="Konsolide E-Ticaret Paneli")
+# ikas CSV verilerini yükle
+df = veriyi_yukle_ve_temizle()
 
-# ==============================================================================
-# 🗃️ KODA GÖMÜLEN SABİT VERİLER
-# ==============================================================================
-SABIT_DOSYA_YOLU = "ikas-siparisler-26201806.csv"
-META_ACCESS_TOKEN = "EAAN6R3WgZApYBRolMblUZAzCN6ePzTPx9iPjddwNjlIpKa50oHRPNIKtIp41ehe4F8UCuVhVZBrlxthb3TY19ZAGG95fF4hEYOpw00YJ6bhUZAD0FkxbZBnVumcZAodCmcuTZBZAKCysHNjeBDGCTaN5ZAJkG8R1FWUjZCVghaZB8I7Iaa2mioAANMxjP1ddtPN3Qg1kadUyFT9EX44pFQZDZD"  # <-- Token'ınızı buraya ekleyin
-META_REKLAM_HESABI_ID = "1604034446875292"   # <-- Sadece rakamlardan oluşan ID girin
-
-def main():
-    st.title("📊 E-Ticaret & Meta Ads Konsolide Yönetim Paneli")
+if df.empty:
+    st.warning("⚠️ 'ikas-siparisler-26201806.csv' dosyası yüklenemedi veya belirtilen sütunlar uyuşmuyor.")
+else:
+    # --- YAN PANEL NAVİGASYON ---
+    st.sidebar.title("🚀 Kaşarcızade Kontrol Paneli")
+    sayfa = st.sidebar.radio(
+        "Analiz Bölümleri:",
+        ["1- Genel Performans & KPI", "2- Şehir Dağılımı", "3- Reklam Performansı & ROAS", "4- BCG Ürün Stratejisi", "5- Fiyat Simülasyonu"]
+    )
     
-    st.sidebar.header("📅 Tarih Filtresi")
-    baslangic = st.sidebar.date_input("Başlangıç Tarihi", value=pd.to_datetime("2026-01-01"))
-    bitis = st.sidebar.date_input("Bitiş Tarihi", value=pd.to_datetime("2026-06-30"))
-
-    # Dosya Mevcudiyet Kontrolü
-    if os.path.exists(SABIT_DOSYA_YOLU):
-        with st.spinner("Tüm finansal veriler ve ürün metrikleri hesaplanıyor..."):
-            segmentler, ecom_ozet, urun_analiz, aylik_sehir_analizi, sehir_ay_pivot = veriyi_ozetle(SABIT_DOSYA_YOLU, str(baslangic), str(bitis))
-            retention_matrix, rfm_df = musteri_analizi_yap(SABIT_DOSYA_YOLU)
-            df_meta = meta_performans_cek(META_ACCESS_TOKEN, META_REKLAM_HESABI_ID, str(baslangic), str(bitis))
+    st.sidebar.divider()
+    st.sidebar.subheader("📅 Dönem Filtresi")
+    
+    min_date = df["tarih"].min().date()
+    max_date = df["tarih"].max().date()
+    
+    tarihler = st.sidebar.date_input("Rapor Tarih Aralığı", [min_date, max_date])
+    
+    # Tarih aralığının doğru seçildiğinden ve Meta API'ye doğru formatta gittiğinden emin oluyoruz
+    if isinstance(tarihler, (list, tuple)) and len(tarihler) == 2:
+        start_str = tarihler[0].strftime("%Y-%m-%d")
+        end_str = tarihler[1].strftime("%Y-%m-%d")
         
-        if not ecom_ozet:
-            st.warning("Seçilen tarih aralığında herhangi bir sipariş verisi bulunamadı.")
-            return
-
-        # Finansal Özet Hesaplamaları
-        toplam_reklam = df_meta['Harcanan Tutar (TL)'].sum() if not df_meta.empty else 0.0
-        ciro = ecom_ozet["toplam_ciro"]
-        maliyet = ecom_ozet["toplam_maliyet"]
-        urun_kar = ecom_ozet["toplam_net_kar"]
-        gercek_kar = urun_kar - toplam_reklam
-        roas = (ciro / toplam_reklam) if toplam_reklam > 0 else 0.0
-        
-        # Adrese Göre Sipariş Sayısı Hesaplama (Belirtilmemiş Hariç)
-        toplam_siparis_sayisi = 0
-        if not aylik_sehir_analizi.empty:
-            filtreli_sehirler = aylik_sehir_analizi[aylik_sehir_analizi['Kargo Adresi Şehir'] != 'BELİRTİLMEMİŞ']
-            toplam_siparis_sayisi = filtreli_sehirler['Sipariş Adedi'].sum()
-        else:
-            toplam_siparis_sayisi = rfm_df['Frequency'].sum() if not rfm_df.empty else 0
-
-        # Tablo Alanı: İstenen Tüm Finansal Metriklerin Sunumu
-        st.subheader("📋 Genel Finansal Performans Özeti")
-        
-        finansal_veri = {
-            "Metrik Bilgisi": [
-                "Toplam Ciro", 
-                "Mal Maliyeti (COGS)", 
-                "Net Kâr (Ürün Bazlı)", 
-                "Toplam Reklam Harcaması", 
-                "Gerçek Net Kâr (Reklam Dahil)",
-                "Toplam Sipariş Sayısı (Adrese Göre)", 
-                "Satılan Toplam Ürün Satış Adedi", 
-                "Genel Kâr Marjı", 
-                "Birleşik ROAS"
-            ],
-            "Değer / Oran": [
-                f"{ciro:,.2f} TL",
-                f"{maliyet:,.2f} TL",
-                f"{urun_kar:,.2f} TL",
-                f"{toplam_reklam:,.2f} TL",
-                f"{gercek_kar:,.2f} TL",
-                f"{toplam_siparis_sayisi:,} Adet",
-                f"{ecom_ozet['toplam_adet']:,} Adet",
-                f"%{ecom_ozet['genel_kar_marji']:.2f}",
-                f"{roas:.2f}"
-            ]
-        }
-        df_finans_tablo = pd.DataFrame(finansal_veri)
-        st.table(df_finans_tablo)
-        
-        st.write("---")
-
-        # Yeni Sekme Yapısı ve Sıralaması (Ürün Satış Detayları ilk sıraya alındı)
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📦 Ürün Satış Detayları",
-            "📊 Şehir Dağılımı (Çubuk Grafik)", 
-            "📐 BCG Matrisi (Ürün Stratejisi)", 
-            "👥 Müşteri Retention (Süreklilik)", 
-            "🎯 RFM Persona Analizi"
-        ])
-
-        # TAB 1: Ürün Satış Detayları (İlk Sırada)
-        with tab1:
-            st.subheader("Ürün Bazlı Satış, Maliyet ve Marj Tablosu (Tarih Filtreli)")
-            if not urun_analiz.empty:
-                gosterilecek_urunler = urun_analiz.rename(columns={
-                    'Ürün Adı': 'Ürün Adı',
-                    'Varyant Değeri 1': 'Varyant',
-                    'Ürün Sayısı': 'Satış Adedi',
-                    'toplam_ciro': 'Toplam Ciro (TL)',
-                    'toplam_maliyet': 'Mal Maliyeti (TL)',
-                    'net_kar': 'Net Kâr (TL)',
-                    'kar_marji_orani': 'Kâr Marjı (%)'
-                }).sort_values(by='Satış Adedi', ascending=False)
-                
-                st.dataframe(
-                    gosterilecek_urunler[[
-                        'Ürün Adı', 'Varyant', 'Satış Adedi', 
-                        'Toplam Ciro (TL)', 'Mal Maliyeti (TL)', 'Net Kâr (TL)', 'Kâr Marjı (%)'
-                    ]].style.format({
-                        'Toplam Ciro (TL)': '{:,.2f}',
-                        'Mal Maliyeti (TL)': '{:,.2f}',
-                        'Net Kâr (TL)': '{:,.2f}',
-                        'Kâr Marjı (%)': '%{:.2f}'
-                    }), 
-                    use_container_width=True
-                )
-            else:
-                st.info("Ürün satışı detay verisi bulunamadı.")
-
-        # TAB 2: Şehir Dağılımı (İkinci Sırada)
-        with tab2:
-            st.subheader("En Çok Sipariş Verilen Top 20 Şehir Dağılımı")
-            if not sehir_ay_pivot.empty:
-                temiz_sehir_pivot = sehir_ay_pivot[sehir_ay_pivot['Kargo Adresi Şehir'] != 'BELİRTİLMEMİŞ']
-                gorsel_matris = temiz_sehir_pivot.set_index('Kargo Adresi Şehir')
-                sehir_toplamlari = gorsel_matris.sum(axis=1).sort_values(ascending=False).head(20)
-                
-                if not sehir_toplamlari.empty:
-                    fig, ax = plt.subplots(figsize=(12, 6))
-                    sehir_toplamlari.plot(kind='bar', color='skyblue', edgecolor='black', ax=ax)
-                    
-                    plt.title("Şehirlere Göre Toplam Sipariş Adetleri (Top 20)", fontsize=13, pad=15)
-                    plt.xlabel("Şehir Adı", fontsize=11)
-                    plt.ylabel("Sipariş Sayısı", fontsize=11)
-                    plt.xticks(rotation=45, ha='right')
-                    plt.grid(axis='y', linestyle='--', alpha=0.7)
-                    
-                    for i, v in enumerate(sehir_toplamlari):
-                        ax.text(i, v + (v * 0.01), str(int(v)), ha='center', va='bottom', fontsize=9)
-                    
-                    st.pyplot(fig)
-                    plt.close(fig)
-                else:
-                    st.info("Filtrelenecek geçerli bir şehir verisi bulunamadı.")
-            else:
-                st.info("Grafik üretimi için kargo şehir verisi bulunamadı.")
-
-        # TAB 3: BCG Matrisi Segmentleri
-        with tab3:
-            st.subheader("BCG Matrisine Göre Ürün Performans Segmentasyonu")
-            sb1, sb2 = st.columns(2)
-            columns_list = ['Ürün Adı', 'Varyant Değeri 1', 'Ürün Sayısı', 'toplam_ciro', 'toplam_maliyet', 'kar_marji_orani']
-            with sb1:
-                st.success("⭐ Yıldızlar (Yüksek Satış - Yüksek Marj)")
-                st.dataframe(segmentler["Yıldızlar (Yüksek Satış - Yüksek Marj)"][columns_list] if not segmentler["Yıldızlar (Yüksek Satış - Yüksek Marj)"].empty else pd.DataFrame(), use_container_width=True)
-                st.info("💎 Gizli Cevherler (Düşük Satış - Yüksek Marj)")
-                st.dataframe(segmentler["Gizli Cevherler (Düşük Satış - Yüksek Marj)"][columns_list] if not segmentler["Gizli Cevherler (Düşük Satış - Yüksek Marj)"].empty else pd.DataFrame(), use_container_width=True)
-            with sb2:
-                st.warning("🚜 Sürümden Kazananlar (Yüksek Satış - Düşük Marj)")
-                st.dataframe(segmentler["Sürümden Kazananlar (Yüksek Satış - Düşük Marj)"][columns_list] if not segmentler["Sürümden Kazananlar (Yüksek Satış - Düşük Marj)"].empty else pd.DataFrame(), use_container_width=True)
-                st.error("📉 Ölü Kilo (Düşük Satış - Düşük Marj)")
-                st.dataframe(segmentler["Ölü Kilo (Düşük Satış - Düşük Marj)"][columns_list] if not segmentler["Ölü Kilo (Düşük Satış - Düşük Marj)"].empty else pd.DataFrame(), use_container_width=True)
-
-        # TAB 4: Cohort Retention
-        with tab4:
-            st.subheader("Müşteri Geri Kazanım Oranları (Cohort Retention %)")
-            if not retention_matrix.empty:
-                fig, ax = plt.subplots(figsize=(14, 6))
-                sns.heatmap(retention_matrix, annot=True, fmt=".1f", cmap="RdYlGn", vmin=0, vmax=25, ax=ax)
-                st.pyplot(fig)
-                plt.close(fig)
-
-        # TAB 5: RFM
-        with tab5:
-            st.subheader("Müşteri Bazlı RFM Skor Tablosu")
-            if not rfm_df.empty:
-                st.dataframe(rfm_df.sort_values(by='Monetary', ascending=False), use_container_width=True)
+        mask = (df["tarih"].dt.date >= tarihler[0]) & (df["tarih"].dt.date <= tarihler[1])
+        df_filt = df[mask]
+        meta_df = get_meta_ads_data(start_str, end_str)
     else:
-        st.error(f"❌ '{SABIT_DOSYA_YOLU}' dosyası bulunamadı. Lütfen bu dosyayı app.py ile yan yana koyun.")
+        start_str = min_date.strftime("%Y-%m-%d")
+        end_str = max_date.strftime("%Y-%m-%d")
+        df_filt = df
+        meta_df = get_meta_ads_data(start_str, end_str)
 
-if __name__ == "__main__":
-    main()
+    # --- MENÜ SAYFALARI ---
+    
+    if sayfa == "1- Genel Performans & KPI":
+        st.header("📈 Şirket Genel Performans Göstergeleri")
+        
+        toplam_ciro = df_filt["toplam_ciro"].sum()
+        toplam_maliyet = df_filt["mal_maliyeti"].sum()
+        
+        # Meta canlı API verilerinin metrik toplamları
+        toplam_reklam_harcamasi = meta_df["Harcama (TL)"].sum() if not meta_df.empty else 0
+        toplam_reklam_geliri = meta_df["E-Ticaret Geliri (TL)"].sum() if not meta_df.empty else 0
+        
+        net_kar_urun = toplam_ciro - toplam_maliyet
+        gercek_net_kar = net_kar_urun - toplam_reklam_harcamasi
+        genel_kar_marji = (gercek_net_kar / toplam_ciro) * 100 if toplam_ciro > 0 else 0
+        birlesik_roas = (toplam_reklam_geliri / toplam_reklam_harcamasi) if toplam_reklam_harcamasi > 0 else 0
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Toplam Ciro", f"{toplam_ciro:,.2f} TL")
+        c2.metric("Mal Maliyeti (COGS)", f"{toplam_maliyet:,.2f} TL")
+        c3.metric("Net Kâr (Ürün Bazlı)", f"{net_kar_urun:,.2f} TL")
+        c4.metric("Toplam Reklam Harcaması", f"{toplam_reklam_harcamasi:,.2f} TL")
+        
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Gerçek Net Kâr (Reklam Dahil)", f"{gercek_net_kar:,.2f} TL")
+        c6.metric("Toplam Sipariş (Adrese Göre)", f"{df_filt['siparis_id'].nunique():,} Adet")
+        c7.metric("Satılan Toplam Ürün Satış Adedi", f"{df_filt['satis_adedi'].sum():,} Adet")
+        c8.metric("Genel Kâr Marjı / Birleşik ROAS", f"%{genel_kar_marji:.2f}", f"ROAS: {birlesik_roas:.2f}")
+        
+        st.write("### Ürün ve Varyant Bazlı Satış, Maliyet ve Marj Tablosu")
+        urun_ozet = df_filt.groupby(["urun_adi", "varyant"]).agg(
+            satis_adedi=("satis_adedi", "sum"),
+            toplam_ciro=("toplam_ciro", "sum"),
+            mal_maliyeti=("mal_maliyeti", "sum")
+        ).reset_index()
+        urun_ozet["net_kar"] = urun_ozet["toplam_ciro"] - urun_ozet["mal_maliyeti"]
+        urun_ozet["kar_marji"] = (urun_ozet["net_kar"] / urun_ozet["toplam_ciro"]) * 100
+        
+        st.dataframe(urun_ozet.style.format({
+            "toplam_ciro": "{:,.2f} TL", 
+            "mal_maliyeti": "{:,.2f} TL", 
+            "net_kar": "{:,.2f} TL",
+            "kar_marji": "%{:.2f}"
+        }), use_container_width=True)
+
+    elif sayfa == "2- Şehir Dağılımı":
+        st.header("📍 Şehir Dağılımı Çubuk Grafiği")
+        sehir_df = df_filt[df_filt["kargo_sehir"].notna() & (df_filt["kargo_sehir"] != "") & (df_filt["kargo_sehir"] != "Belirtilmemiş")]
+        
+        if not sehir_df.empty:
+            city_data = sehir_df.groupby("kargo_sehir")["siparis_id"].count().reset_index().sort_values("siparis_id", ascending=False)
+            fig = px.bar(city_data, x="kargo_sehir", y="siparis_id", color="siparis_id", text_auto=True, 
+                         labels={"siparis_id": "Sipariş Sayısı", "kargo_sehir": "Kargo Şehir Adresi"})
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Seçilen filtrelerde kargo şehir adresi verisi bulunamadı.")
+
+    elif sayfa == "3- Reklam Performansı & ROAS":
+        st.header("📣 Reklamların ROAS Değerleri ve Reklam Maliyetleri")
+        
+        if not meta_df.empty:
+            # Sınırsız ROAS hatası (sıfıra bölünme) koruması
+            meta_df["ROAS"] = np.where(meta_df["Harcama (TL)"] > 0, meta_df["E-Ticaret Geliri (TL)"] / meta_df["Harcama (TL)"], 0)
+            
+            r_col1, r_col2, r_col3 = st.columns(3)
+            r_col1.metric("Toplam Reklam Maliyeti", f"{meta_df['Harcama (TL)'].sum():,.2f} TL")
+            r_col2.metric("Reklam Gelirleri", f"{meta_df['E-Ticaret Geliri (TL)'].sum():,.2f} TL")
+            
+            hesap_harcama = meta_df['Harcama (TL)'].sum()
+            birlesik_roas_val = (meta_df['E-Ticaret Geliri (TL)'].sum() / hesap_harcama) if hesap_harcama > 0 else 0
+            r_col3.metric("Birleşik ROAS Değeri", f"{birlesik_roas_val:.2f}")
+            
+            st.dataframe(meta_df.style.format({"Harcama (TL)": "{:,.2f} TL", "E-Ticaret Geliri (TL)": "{:,.2f} TL", "ROAS": "{:.2f}x"}), use_container_width=True)
+            fig_roas = px.bar(meta_df, x="Kampanya Adı", y="ROAS", color="ROAS", text_auto=".2f", color_continuous_scale="RdYlGn")
+            st.plotly_chart(fig_roas, use_container_width=True)
+        else:
+            st.info("Seçilen tarih aralığında Meta reklam verisi bulunamadı veya API verisi boş.")
+
+    elif sayfa == "4- BCG Ürün Stratejisi":
+        st.header("🎯 BCG Matrisi Ürün Stratejisi")
+        bcg_sonuc = bcg_stratejisi_hesapla(df_filt)
+        
+        if not bcg_sonuc.empty:
+            secilen_strateji = st.selectbox("İncelemek İstediğiniz Strateji Grubu:", ["Yıldızlar", "Sürümden Kazananlar", "Gizli Cevherler", "Ölü Kilo"])
+            detay_tablo = bcg_sonuc[bcg_sonuc["Strateji"] == secilen_strateji]
+            
+            st.subheader(f"💎 {secilen_strateji} Segmentindeki Ürünler")
+            st.dataframe(detay_tablo[["urun_adi", "varyant", "urun_sayisi", "toplam_ciro", "toplam_maliyet"]].style.format({
+                "toplam_ciro": "{:,.2f} TL",
+                "toplam_maliyet": "{:,.2f} TL",
+                "urun_sayisi": "{:,}"
+            }), use_container_width=True)
+            
+            fig_bcg = px.scatter(bcg_sonuc, x="urun_sayisi", y="toplam_ciro", color="Strateji", size="toplam_ciro", hover_data=["urun_adi", "varyant"], text="urun_adi")
+            st.plotly_chart(fig_bcg, use_container_width=True)
+
+    elif sayfa == "5- Fiyat Simülasyonu":
+        st.header("🧪 Ürünlerin Varyant Bazlı Fiyat Simülasyonu")
+        
+        if 'urun_adi' in df_filt.columns and not df_filt.empty:
+            col_s1, col_s2 = st.columns([1, 2])
+            with col_s1:
+                secilen_urun = st.selectbox("Ürün Seçin", df_filt["urun_adi"].unique())
+                secilen_varyant = st.selectbox("Varyant Seçin", df_filt[df_filt["urun_adi"] == secilen_urun]["varyant"].unique())
+                
+                target_df = df_filt[(df_filt["urun_adi"] == secilen_urun) & (df_filt["varyant"] == secilen_varyant)]
+                mevcut_adet = target_df["satis_adedi"].sum()
+                mevcut_ciro = target_df["toplam_ciro"].sum()
+                mevcut_maliyet = target_df["mal_maliyeti"].sum()
+                
+                mevcut_fiyat = target_df["birim_satis_fiyati"].mean() if mevcut_adet > 0 else 0
+                
+                yeni_fiyat = st.slider("Dinamik Birim Fiyat Simülasyonu (TL)", float(mevcut_fiyat*0.5), float(mevcut_fiyat*2.0), float(mevcut_fiyat), step=5.0)
+                
+            with col_s2:
+                yeni_ciro = mevcut_adet * yeni_fiyat
+                yeni_kar = yeni_ciro - mevcut_maliyet
+                eski_kar = mevcut_ciro - mevcut_maliyet
+                
+                st.subheader("Karlılık Nasıl Değişiyor?")
+                res_c1, res_c2 = st.columns(2)
+                res_c1.metric("Yeni Tahmini Toplam Ciro", f"{yeni_ciro:,.2f} TL", f"{yeni_ciro - mevcut_ciro:,.2f} TL")
+                res_c2.metric("Yeni Tahmini Net Kâr", f"{yeni_kar:,.2f} TL", f"{yeni_kar - eski_kar:,.2f} TL")
